@@ -1,7 +1,7 @@
 import tensorflow as tf
 import numpy as np
 from verify_tfrecord import load_tfrecord_dataset  # replace with your actual module
-
+from models import Model_RNN, Model_base
 # Constants
 BATCH_SIZE = 32
 SHUFFLE_BUFFER = 1000
@@ -19,18 +19,7 @@ def split_dataset(dataset, dataset_size, train_frac=0.8, val_frac=0.1):
 
     return train_ds, val_ds, test_ds
 
-class Model(tf.Module):
-    def __init__(self):
-        super().__init__()
-        self.flatten = tf.keras.layers.Flatten()
-        self.dense1 = tf.keras.layers.Dense(64, activation='relu')
-        self.out = tf.keras.layers.Dense(2)  # Output shape (2,) for [p1_elo, p2_elo]
 
-    def __call__(self, x):
-        x = tf.cast(x, tf.float32)
-        x = self.flatten(x)
-        x = self.dense1(x)
-        return self.out(x)
 
 def prepare_for_training(dataset, batch_size=BATCH_SIZE):
     def map_fn(tensor, p1_elo, p2_elo, p1_color):
@@ -45,13 +34,14 @@ def prepare_for_training(dataset, batch_size=BATCH_SIZE):
         .prefetch(tf.data.AUTOTUNE)
     )
 
-def train(model, train_ds, val_ds, epochs=EPOCHS):
+def train(model, train_ds, val_ds, test_ds, epochs=EPOCHS):
     optimizer = tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE)
     loss_fn = tf.keras.losses.MeanSquaredError()
 
     for epoch in range(1, epochs + 1):
         train_loss = tf.keras.metrics.Mean()
         val_loss = tf.keras.metrics.Mean()
+        test_loss = tf.keras.metrics.Mean()
 
         # Training loop
         for x_batch, y_batch in train_ds:
@@ -69,27 +59,46 @@ def train(model, train_ds, val_ds, epochs=EPOCHS):
             loss = loss_fn(y_batch, preds)
             val_loss.update_state(loss)
 
-        print(f"Epoch {epoch}/{epochs} — Train Loss: {train_loss.result():.4f}, Val Loss: {val_loss.result():.4f}")
+        # Test loop + collect predictions
+        sample_preds = []
+        for x_batch, y_batch in test_ds:
+            preds = model(x_batch)
+            loss = loss_fn(y_batch, preds)
+            test_loss.update_state(loss)
 
+            if len(sample_preds) < 10:
+                for x, true, pred in zip(x_batch, y_batch, preds):
+                    sample_preds.append((true.numpy(), pred.numpy()))
+                    if len(sample_preds) >= 10:
+                        break
+
+        print(f"Epoch {epoch}/{epochs} — "
+              f"Train Loss: {train_loss.result():.4f}, "
+              f"Val Loss: {val_loss.result():.4f}, "
+              f"Test Loss: {test_loss.result():.4f}")
+
+        print("Sample predictions (true vs predicted ELOs):")
+        for i, (true, pred) in enumerate(sample_preds):
+            true = np.round(true, 1)
+            pred = np.round(pred, 1)
+            print(f"  [{i+1}] True: {true}  Pred: {pred}")
 def main(tfrecord_path):
     dataset = load_tfrecord_dataset(tfrecord_path)
 
-    train_ds, val_ds, test_ds = split_dataset(dataset, dataset_size=42)
+    train_ds, val_ds, test_ds = split_dataset(dataset, dataset_size=121332)
 
     train_ds = prepare_for_training(train_ds)
     val_ds = prepare_for_training(val_ds)
     test_ds = prepare_for_training(test_ds)
 
-    model = Model()
+    model = Model_base()
 
-    # Print example batch shapes
     for x_batch, y_batch in train_ds.take(1):
-        print(f"Input batch shape: {x_batch.shape}")  # (batch, 80, 8, 8)
-        print(f"Label batch shape: {y_batch.shape}")  # (batch, 2)
+        print(f"Input batch shape: {x_batch.shape}")
+        print(f"Label batch shape: {y_batch.shape}")
 
     print("Starting training loop...")
-    train(model, train_ds, val_ds, epochs=EPOCHS)
-
+    train(model, train_ds, val_ds, test_ds, epochs=EPOCHS)
     print("Training complete.")
 
 if __name__ == "__main__":
